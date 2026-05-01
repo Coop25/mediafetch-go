@@ -1,0 +1,11 @@
+# env files
+.env*
+!.env.example
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+
+# Local downloads
+downloads/
