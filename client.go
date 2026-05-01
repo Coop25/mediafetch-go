@@ -119,33 +119,12 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 	}
 
 	outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
-	args := []string{
-		"-o", outputTemplate,
-		"--no-playlist",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-	}
-
-	if IsYouTubeURL(rawURL) {
-		args = append(args, "--merge-output-format", "mp4")
-	}
-
 	primarySelector, fallbackSelector := buildDownloadSelectors(rawURL, formatID)
-	if primarySelector != "" {
-		args = append(args, "-f", primarySelector)
-	}
-	args = append(args, rawURL)
+	args := buildDownloadArgs(rawURL, outputTemplate, primarySelector)
 
 	if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
-		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != "" && fallbackSelector != primarySelector {
-			retryArgs := []string{
-				"-o", outputTemplate,
-				"--no-playlist",
-				"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-			}
-			if IsYouTubeURL(rawURL) {
-				retryArgs = append(retryArgs, "--merge-output-format", "mp4")
-			}
-			retryArgs = append(retryArgs, "-f", fallbackSelector, rawURL)
+		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
+			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector)
 			if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr != nil {
 				return "", friendlyYTDLPError(retryErr)
 			}
@@ -165,10 +144,14 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 
 func buildDownloadSelectors(rawURL, formatID string) (string, string) {
 	isYouTube := IsYouTubeURL(rawURL)
+	isReddit := IsRedditURL(rawURL)
 
 	if formatID == "" || formatID == "best" {
 		if isYouTube {
 			return "bv*+ba/b", "b"
+		}
+		if isReddit {
+			return "", "b"
 		}
 		return "best", ""
 	}
@@ -177,7 +160,29 @@ func buildDownloadSelectors(rawURL, formatID string) (string, string) {
 		return formatID + "+ba/" + formatID + "/bv*+ba/b", "bv*+ba/b"
 	}
 
+	if isReddit {
+		return formatID + "+bestaudio/" + formatID, ""
+	}
+
 	return formatID + "/best", "best"
+}
+
+func buildDownloadArgs(rawURL, outputTemplate, selector string) []string {
+	args := []string{
+		"-o", outputTemplate,
+		"--no-playlist",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+	}
+
+	if IsYouTubeURL(rawURL) || IsRedditURL(rawURL) {
+		args = append(args, "--merge-output-format", "mp4")
+	}
+
+	if selector != "" {
+		args = append(args, "-f", selector)
+	}
+
+	return append(args, rawURL)
 }
 
 func buildInfoStrategies(rawURL string) [][]string {
