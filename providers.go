@@ -1,4 +1,4 @@
-package videodl
+package mediafetch
 
 import (
 	"net/url"

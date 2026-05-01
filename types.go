@@ -1,4 +1,4 @@
-package videodl
+package mediafetch
 
 type Format struct {
 	FormatID   string `json:"format_id"`

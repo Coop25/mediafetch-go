@@ -1,4 +1,4 @@
-package videodl
+package mediafetch
 
 type ytdlpInfo struct {
 	Title     string        `json:"title"`
