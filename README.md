@@ -1,17 +1,19 @@
-# videodl
+# mediafetch-go
 
-`videodl` is a small Go package for working with video URLs through `yt-dlp`.
+`mediafetch-go` is a lightweight Go package for fetching media metadata and downloading supported videos through `yt-dlp`.
 
-It gives your application a direct in-process way to:
+It is designed for apps that need a small in-process media layer without building a full downloader service.
 
-- accept a supported URL
-- inspect basic video metadata
-- inspect normalized download formats
+With it, you can:
+
+- validate a supported media URL
+- extract title, thumbnail, duration, and available formats
+- normalize download options for your UI or API
 - download the selected file to disk
 
-This repository is intentionally just the reusable package. There is no web app, API server, or frontend here.
+This repository is the reusable package only. There is no bundled web app, CLI, or API server.
 
-## Supported Sites
+## Supported Providers
 
 - Facebook
 - YouTube
@@ -25,14 +27,23 @@ Your runtime environment needs:
 - `yt-dlp` available on `PATH`
 - `ffmpeg` available on `PATH`
 
-## Install Or Copy
+## Install
 
-You can use this code in either of two ways:
+The current module path is:
 
-1. Import it as a Go module
-2. Copy the `.go` files into your own project and keep them as an internal package
+```go
+module facebook-video-downloader
+```
 
-If you copy it into another project, the only source files you need are:
+Example import:
+
+```go
+import videodl "facebook-video-downloader"
+```
+
+If you prefer, you can also copy the package files directly into another project as an internal package.
+
+Files needed for that approach:
 
 - `client.go`
 - `types.go`
@@ -40,7 +51,7 @@ If you copy it into another project, the only source files you need are:
 - `exec.go`
 - `ytdlp_types.go`
 
-## Package API
+## API Overview
 
 Main exported pieces:
 
@@ -54,7 +65,9 @@ Main exported pieces:
 - `Format`
 - `VideoInfo`
 
-### Create a Client
+## Quick Start
+
+Create a client:
 
 ```go
 client, err := videodl.NewClient(videodl.ClientConfig{
@@ -62,7 +75,7 @@ client, err := videodl.NewClient(videodl.ClientConfig{
 })
 ```
 
-### Extract Metadata
+Extract metadata:
 
 ```go
 downloadID, info, err := client.Extract(ctx, videoURL)
@@ -72,9 +85,9 @@ downloadID, info, err := client.Extract(ctx, videoURL)
 
 - a generated download ID
 - a `VideoInfo` value
-- an error, if extraction fails
+- an error if extraction fails
 
-### Download the File
+Download the file:
 
 ```go
 filePath, err := client.Download(ctx, videoURL, downloadID, "best")
@@ -132,7 +145,7 @@ videodl.IsYouTubeURL(url)
 videodl.IsRedditURL(url)
 ```
 
-## Data Shapes
+## Data Model
 
 `VideoInfo` contains:
 
@@ -149,27 +162,37 @@ Each `Format` contains:
 - `Filesize`
 - `FormatNote`
 
-## File Layout
+## How It Works
+
+`mediafetch-go` delegates provider-specific extraction and downloading to `yt-dlp`, while the Go package handles:
+
+- supported-host validation
+- metadata parsing
+- format normalization
+- download directory management
+- friendlier application-facing errors
+
+## Repository Layout
 
 ```text
 .
-├── client.go
-├── exec.go
-├── providers.go
-├── types.go
-├── ytdlp_types.go
-├── go.mod
-└── LICENSE
+|-- client.go
+|-- exec.go
+|-- providers.go
+|-- types.go
+|-- ytdlp_types.go
+|-- go.mod
+`-- LICENSE
 ```
 
 ## Notes
+
+- This package depends on upstream `yt-dlp` behavior, so provider changes can break extraction.
+- Some videos may fail if they are private, age-restricted, login-protected, or region-limited.
+- Facebook links may require a direct video URL instead of a share link.
+
 ## Personal Use
 
-- This tool is for personal use only.
-- Please respect copyright laws.
-- Please respect Facebook's Terms of Service.
-- Downloaded videos should not be distributed without permission.
-
-- This package delegates site-specific extraction to `yt-dlp`.
-- Some URLs may fail because the upstream site changes behavior.
-- Private, age-restricted, login-protected, or region-limited videos may not download successfully.
+- Use this responsibly and in compliance with local law.
+- Respect platform terms of service and copyright restrictions.
+- Do not redistribute downloaded content without permission.
