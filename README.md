@@ -29,16 +29,16 @@ Your runtime environment needs:
 
 ## Install
 
-The current module path is:
+The repo is documented as:
 
 ```go
-module facebook-video-downloader
+module github.com/Coop25/mediafetch-go
 ```
 
 Example import:
 
 ```go
-import videodl "facebook-video-downloader"
+import mediafetch "github.com/Coop25/mediafetch-go"
 ```
 
 If you prefer, you can also copy the package files directly into another project as an internal package.
@@ -70,7 +70,7 @@ Main exported pieces:
 Create a client:
 
 ```go
-client, err := videodl.NewClient(videodl.ClientConfig{
+client, err := mediafetch.NewClient(mediafetch.ClientConfig{
 	DownloadDir: "downloads",
 })
 ```
@@ -104,11 +104,11 @@ import (
 	"context"
 	"log"
 
-	videodl "facebook-video-downloader"
+	mediafetch "github.com/Coop25/mediafetch-go"
 )
 
 func main() {
-	client, err := videodl.NewClient(videodl.ClientConfig{
+	client, err := mediafetch.NewClient(mediafetch.ClientConfig{
 		DownloadDir: "downloads",
 	})
 	if err != nil {
@@ -139,10 +139,10 @@ func main() {
 Use the helpers when you want to check support before extraction:
 
 ```go
-videodl.ValidateSupportedURL(url)
-videodl.IsFacebookURL(url)
-videodl.IsYouTubeURL(url)
-videodl.IsRedditURL(url)
+mediafetch.ValidateSupportedURL(url)
+mediafetch.IsFacebookURL(url)
+mediafetch.IsYouTubeURL(url)
+mediafetch.IsRedditURL(url)
 ```
 
 ## Data Model
