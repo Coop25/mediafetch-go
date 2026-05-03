@@ -101,7 +101,7 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 	}
 
 	_ = os.RemoveAll(downloadPath)
-	return "", VideoInfo{}, friendlyYTDLPError(lastErr)
+	return "", VideoInfo{}, friendlyYTDLPError(rawURL, lastErr)
 }
 
 func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID string) (string, error) {
@@ -126,10 +126,10 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
 			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector)
 			if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr != nil {
-				return "", friendlyYTDLPError(retryErr)
+				return "", friendlyYTDLPError(rawURL, retryErr)
 			}
 		} else {
-			return "", friendlyYTDLPError(err)
+			return "", friendlyYTDLPError(rawURL, err)
 		}
 	}
 
@@ -145,6 +145,9 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 func buildDownloadSelectors(rawURL, formatID string) (string, string) {
 	isYouTube := IsYouTubeURL(rawURL)
 	isReddit := IsRedditURL(rawURL)
+	isInstagram := IsInstagramURL(rawURL)
+	isTikTok := IsTikTokURL(rawURL)
+	isTwitter := IsTwitterURL(rawURL)
 
 	if formatID == "" || formatID == "best" {
 		if isYouTube {
@@ -152,6 +155,9 @@ func buildDownloadSelectors(rawURL, formatID string) (string, string) {
 		}
 		if isReddit {
 			return "", "b"
+		}
+		if isInstagram || isTikTok || isTwitter {
+			return "bv*+ba/b", "b"
 		}
 		return "best", ""
 	}
@@ -164,6 +170,10 @@ func buildDownloadSelectors(rawURL, formatID string) (string, string) {
 		return formatID + "+bestaudio/" + formatID, ""
 	}
 
+	if isInstagram || isTikTok || isTwitter {
+		return formatID + "+ba/" + formatID + "/bv*+ba/b", "bv*+ba/b"
+	}
+
 	return formatID + "/best", "best"
 }
 
@@ -174,7 +184,7 @@ func buildDownloadArgs(rawURL, outputTemplate, selector string) []string {
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 	}
 
-	if IsYouTubeURL(rawURL) || IsRedditURL(rawURL) {
+	if IsYouTubeURL(rawURL) || IsRedditURL(rawURL) || IsInstagramURL(rawURL) || IsTikTokURL(rawURL) || IsTwitterURL(rawURL) {
 		args = append(args, "--merge-output-format", "mp4")
 	}
 
@@ -280,7 +290,7 @@ func buildFormatNote(resolution, ext string, hasHeight bool) string {
 	return fmt.Sprintf("Standard quality - %s", strings.ToUpper(fallback(ext, "mp4")))
 }
 
-func friendlyYTDLPError(err error) error {
+func friendlyYTDLPError(rawURL string, err error) error {
 	if err == nil {
 		return errors.New("video processing failed")
 	}
@@ -288,16 +298,38 @@ func friendlyYTDLPError(err error) error {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "Cannot parse data"), strings.Contains(strings.ToLower(message), "unable to extract"):
-		return errors.New(
-			"Unable to download this video. Facebook has updated their security measures.\n" +
-				"1. For Reels: open the link in your browser and copy the full reel URL.\n" +
-				"2. For regular videos: try the direct video URL instead of a share link.\n" +
-				"3. Some videos are restricted and cannot be downloaded.",
-		)
+		return errors.New(providerExtractionError(rawURL))
 	case strings.Contains(message, "Private video"), strings.Contains(strings.ToLower(message), "login"):
-		return errors.New("This video appears to be private or requires login. Only public videos can be downloaded.")
+		return errors.New("This video appears to be private or requires login. Only public posts or videos can be downloaded.")
 	default:
 		return fmt.Errorf("could not process video: %s", compactCommandError(message))
+	}
+}
+
+func providerExtractionError(rawURL string) string {
+	switch {
+	case IsFacebookURL(rawURL):
+		return "Unable to download this Facebook video.\n" +
+			"1. For Reels: open the link in your browser and copy the full reel URL.\n" +
+			"2. For regular videos: try the direct video URL instead of a share link.\n" +
+			"3. Some videos are restricted and cannot be downloaded."
+	case IsInstagramURL(rawURL):
+		return "Unable to download this Instagram post.\n" +
+			"1. Use the full post, reel, or story URL instead of a shortened share link.\n" +
+			"2. Only public Instagram content is supported.\n" +
+			"3. Some posts are restricted and cannot be downloaded."
+	case IsTikTokURL(rawURL):
+		return "Unable to download this TikTok post.\n" +
+			"1. Use the full TikTok video URL instead of a share redirect when possible.\n" +
+			"2. Only public TikTok content is supported.\n" +
+			"3. Some posts are restricted and cannot be downloaded."
+	case IsTwitterURL(rawURL):
+		return "Unable to download this Twitter/X post.\n" +
+			"1. Use the full tweet or x.com status URL instead of a share redirect when possible.\n" +
+			"2. Only public Twitter/X content is supported.\n" +
+			"3. Some posts are restricted and cannot be downloaded."
+	default:
+		return "Unable to download this video because the provider data could not be extracted."
 	}
 }
 

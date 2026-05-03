@@ -6,17 +6,32 @@ import (
 )
 
 var (
-	facebookHosts = []string{"facebook.com", "fb.com", "fb.watch", "m.facebook.com"}
-	youTubeHosts  = []string{"youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
-	redditHosts   = []string{"reddit.com", "www.reddit.com", "old.reddit.com", "redd.it", "v.redd.it"}
+	facebookHosts  = []string{"facebook.com", "fb.com", "fb.watch", "m.facebook.com"}
+	instagramHosts = []string{"instagram.com", "www.instagram.com", "m.instagram.com", "instagr.am"}
+	tikTokHosts    = []string{"tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"}
+	twitterHosts   = []string{"twitter.com", "www.twitter.com", "mobile.twitter.com", "x.com", "www.x.com", "mobile.x.com"}
+	youTubeHosts   = []string{"youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
+	redditHosts    = []string{"reddit.com", "www.reddit.com", "old.reddit.com", "redd.it", "v.redd.it"}
 )
 
 func ValidateSupportedURL(raw string) bool {
-	return IsFacebookURL(raw) || IsYouTubeURL(raw) || IsRedditURL(raw)
+	return IsFacebookURL(raw) || IsInstagramURL(raw) || IsTikTokURL(raw) || IsTwitterURL(raw) || IsYouTubeURL(raw) || IsRedditURL(raw)
 }
 
 func IsFacebookURL(raw string) bool {
 	return matchesHost(raw, facebookHosts)
+}
+
+func IsInstagramURL(raw string) bool {
+	return matchesHost(raw, instagramHosts)
+}
+
+func IsTikTokURL(raw string) bool {
+	return matchesHost(raw, tikTokHosts)
+}
+
+func IsTwitterURL(raw string) bool {
+	return matchesHost(raw, twitterHosts)
 }
 
 func IsYouTubeURL(raw string) bool {

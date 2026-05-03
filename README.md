@@ -16,6 +16,9 @@ This repository is the reusable package only. There is no bundled web app, CLI, 
 ## Supported Providers
 
 - Facebook
+- Instagram
+- TikTok
+- Twitter/X
 - YouTube
 - Reddit
 
@@ -60,6 +63,9 @@ Main exported pieces:
 - `Client`
 - `ValidateSupportedURL`
 - `IsFacebookURL`
+- `IsInstagramURL`
+- `IsTikTokURL`
+- `IsTwitterURL`
 - `IsYouTubeURL`
 - `IsRedditURL`
 - `Format`
@@ -141,6 +147,9 @@ Use the helpers when you want to check support before extraction:
 ```go
 mediafetch.ValidateSupportedURL(url)
 mediafetch.IsFacebookURL(url)
+mediafetch.IsInstagramURL(url)
+mediafetch.IsTikTokURL(url)
+mediafetch.IsTwitterURL(url)
 mediafetch.IsYouTubeURL(url)
 mediafetch.IsRedditURL(url)
 ```
@@ -190,6 +199,8 @@ Each `Format` contains:
 - This package depends on upstream `yt-dlp` behavior, so provider changes can break extraction.
 - Some videos may fail if they are private, age-restricted, login-protected, or region-limited.
 - Facebook links may require a direct video URL instead of a share link.
+- Instagram and TikTok support public posts only and may fail on login-gated or restricted content.
+- Twitter/X support public posts only and may fail on protected, login-gated, or restricted content.
 
 ## Personal Use
 
