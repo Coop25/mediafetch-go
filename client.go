@@ -62,42 +62,82 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 	}
 
 	var lastErr error
-	for _, candidateURL := range c.buildMediaURLCandidates(ctx, rawURL) {
-		for _, args := range buildInfoStrategies(candidateURL) {
-			output, err := runCommand(ctx, c.ytdlpBinary, args...)
-			if err != nil {
-				lastErr = err
-				continue
-			}
+	for _, args := range buildInfoStrategies(rawURL) {
+		output, err := runCommand(ctx, c.ytdlpBinary, args...)
+		if err != nil {
+			lastErr = err
+			continue
+		}
 
-			var info ytdlpInfo
-			if err := json.Unmarshal(output, &info); err != nil {
-				lastErr = fmt.Errorf("parse yt-dlp output: %w", err)
-				continue
-			}
+		var info ytdlpInfo
+		if err := json.Unmarshal(output, &info); err != nil {
+			lastErr = fmt.Errorf("parse yt-dlp output: %w", err)
+			continue
+		}
 
-			formats := normalizeFormats(info.Formats)
-			if len(formats) == 0 {
-				formats = []Format{{
-					FormatID:   "best",
-					Resolution: "best",
-					Ext:        "mp4",
-					FormatNote: "Best available quality - MP4 (recommended)",
-				}}
-			}
+		formats := normalizeFormats(info.Formats)
+		if len(formats) == 0 {
+			formats = []Format{{
+				FormatID:   "best",
+				Resolution: "best",
+				Ext:        "mp4",
+				FormatNote: "Best available quality - MP4 (recommended)",
+			}}
+		}
 
-			var duration *int
-			if info.Duration != nil {
-				d := int(math.Round(*info.Duration))
-				duration = &d
-			}
+		var duration *int
+		if info.Duration != nil {
+			d := int(math.Round(*info.Duration))
+			duration = &d
+		}
 
-			return downloadID, VideoInfo{
-				ThumbnailURL: info.Thumbnail,
-				Title:        fallback(info.Title, "Video"),
-				Duration:     duration,
-				Formats:      formats,
-			}, nil
+		return downloadID, VideoInfo{
+			ThumbnailURL: info.Thumbnail,
+			Title:        fallback(info.Title, "Video"),
+			Duration:     duration,
+			Formats:      formats,
+		}, nil
+	}
+
+	if shouldRetryWithResolvedURL(rawURL, lastErr) {
+		resolvedURL := c.resolveMediaURL(ctx, rawURL)
+		if resolvedURL != rawURL {
+			for _, args := range buildInfoStrategies(resolvedURL) {
+				output, err := runCommand(ctx, c.ytdlpBinary, args...)
+				if err != nil {
+					lastErr = err
+					continue
+				}
+
+				var info ytdlpInfo
+				if err := json.Unmarshal(output, &info); err != nil {
+					lastErr = fmt.Errorf("parse yt-dlp output: %w", err)
+					continue
+				}
+
+				formats := normalizeFormats(info.Formats)
+				if len(formats) == 0 {
+					formats = []Format{{
+						FormatID:   "best",
+						Resolution: "best",
+						Ext:        "mp4",
+						FormatNote: "Best available quality - MP4 (recommended)",
+					}}
+				}
+
+				var duration *int
+				if info.Duration != nil {
+					d := int(math.Round(*info.Duration))
+					duration = &d
+				}
+
+				return downloadID, VideoInfo{
+					ThumbnailURL: info.Thumbnail,
+					Title:        fallback(info.Title, "Video"),
+					Duration:     duration,
+					Formats:      formats,
+				}, nil
+			}
 		}
 	}
 
@@ -121,51 +161,62 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 
 	outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
 	var lastErr error
-	for _, candidateURL := range c.buildMediaURLCandidates(ctx, rawURL) {
-		primarySelector, fallbackSelector := buildDownloadSelectors(candidateURL, formatID)
-		args := buildDownloadArgs(candidateURL, outputTemplate, primarySelector)
-
-		if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
-			lastErr = err
-			if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
-				retryArgs := buildDownloadArgs(candidateURL, outputTemplate, fallbackSelector)
-				if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr == nil {
-					lastErr = nil
-					break
-				} else {
-					lastErr = retryErr
-				}
+	primarySelector, fallbackSelector := buildDownloadSelectors(rawURL, formatID)
+	args := buildDownloadArgs(rawURL, outputTemplate, primarySelector)
+	if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
+		lastErr = err
+		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
+			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector)
+			if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr == nil {
+				lastErr = nil
+			} else {
+				lastErr = retryErr
 			}
-		} else {
-			lastErr = nil
-			break
+		}
+	} else {
+		lastErr = nil
+	}
+
+	if lastErr != nil && shouldRetryWithResolvedURL(rawURL, lastErr) {
+		resolvedURL := c.resolveMediaURL(ctx, rawURL)
+		if resolvedURL != rawURL {
+			primarySelector, fallbackSelector = buildDownloadSelectors(resolvedURL, formatID)
+			args = buildDownloadArgs(resolvedURL, outputTemplate, primarySelector)
+			if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
+				lastErr = err
+				if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
+					retryArgs := buildDownloadArgs(resolvedURL, outputTemplate, fallbackSelector)
+					if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr == nil {
+						lastErr = nil
+					} else {
+						lastErr = retryErr
+					}
+				}
+			} else {
+				lastErr = nil
+			}
 		}
 	}
-	if lastErr != nil {
-		return "", friendlyYTDLPError(rawURL, lastErr)
+
+	if lastErr == nil {
+		matches, err := filepath.Glob(filepath.Join(downloadPath, "*"))
+		if err != nil || len(matches) == 0 {
+			return "", errors.New("download completed but no file was created")
+		}
+
+		slices.Sort(matches)
+		return matches[0], nil
 	}
 
-	matches, err := filepath.Glob(filepath.Join(downloadPath, "*"))
-	if err != nil || len(matches) == 0 {
-		return "", errors.New("download completed but no file was created")
-	}
-
-	slices.Sort(matches)
-	return matches[0], nil
+	return "", friendlyYTDLPError(rawURL, lastErr)
 }
 
-func (c *Client) buildMediaURLCandidates(ctx context.Context, rawURL string) []string {
-	candidates := []string{rawURL}
-	if !shouldResolveRedirect(rawURL) {
-		return candidates
+func shouldRetryWithResolvedURL(rawURL string, err error) bool {
+	if err == nil || !shouldResolveRedirect(rawURL) {
+		return false
 	}
 
-	resolvedURL := c.resolveMediaURL(ctx, rawURL)
-	if strings.TrimSpace(resolvedURL) == "" || resolvedURL == rawURL {
-		return candidates
-	}
-
-	return append(candidates, resolvedURL)
+	return strings.Contains(err.Error(), "Unsupported URL")
 }
 
 func (c *Client) resolveMediaURL(ctx context.Context, rawURL string) string {
