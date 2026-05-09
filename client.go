@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -17,9 +18,12 @@ import (
 )
 
 type Client struct {
-	downloadDir string
-	ytdlpBinary string
+	downloadDir       string
+	ytdlpBinary       string
+	fallbackProviders []FallbackProvider
 }
+
+const fallbackManifestName = ".mediafetch-fallback.json"
 
 func NewClient(cfg ClientConfig) (*Client, error) {
 	downloadDir := strings.TrimSpace(cfg.DownloadDir)
@@ -37,8 +41,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	return &Client{
-		downloadDir: downloadDir,
-		ytdlpBinary: ytdlpBinary,
+		downloadDir:       downloadDir,
+		ytdlpBinary:       ytdlpBinary,
+		fallbackProviders: append([]FallbackProvider(nil), cfg.FallbackProviders...),
 	}, nil
 }
 
@@ -61,6 +66,113 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 		return "", VideoInfo{}, fmt.Errorf("create download directory: %w", err)
 	}
 
+	info, lastErr := c.extractWithYTDLP(ctx, rawURL)
+	if lastErr == nil {
+		return downloadID, VideoInfo{
+			ThumbnailURL: info.ThumbnailURL,
+			Title:        info.Title,
+			Duration:     info.Duration,
+			Formats:      info.Formats,
+		}, nil
+	}
+
+	if shouldRetryWithResolvedURL(rawURL, lastErr) {
+		resolvedURL := c.resolveMediaURL(ctx, rawURL)
+		if resolvedURL != rawURL {
+			info, resolvedErr := c.extractWithYTDLP(ctx, resolvedURL)
+			if resolvedErr == nil {
+				if err := writeFallbackManifest(downloadPath, FallbackMedia{CanonicalURL: resolvedURL, Info: info}); err != nil {
+					_ = os.RemoveAll(downloadPath)
+					return "", VideoInfo{}, err
+				}
+
+				return downloadID, VideoInfo{
+					ThumbnailURL: info.ThumbnailURL,
+					Title:        info.Title,
+					Duration:     info.Duration,
+					Formats:      info.Formats,
+				}, nil
+			}
+			lastErr = resolvedErr
+		}
+	}
+
+	if fallbackMedia, fallbackErr := c.resolveWithFallbackProviders(ctx, rawURL); fallbackErr == nil {
+		if fallbackMedia.CanonicalURL != "" {
+			if info, resolvedErr := c.extractWithYTDLP(ctx, fallbackMedia.CanonicalURL); resolvedErr == nil {
+				fallbackMedia.Info = mergeFallbackInfo(fallbackMedia.Info, info)
+			}
+		}
+
+		if len(fallbackMedia.Info.Formats) == 0 {
+			fallbackMedia.Info.Formats = formatsFromDirectMedia(fallbackMedia.Downloads)
+		}
+		fallbackMedia.Info.Title = fallback(fallbackMedia.Info.Title, "Video")
+
+		if err := writeFallbackManifest(downloadPath, *fallbackMedia); err != nil {
+			_ = os.RemoveAll(downloadPath)
+			return "", VideoInfo{}, err
+		}
+
+		return downloadID, fallbackMedia.Info, nil
+	} else if fallbackErr != nil {
+		lastErr = fallbackErr
+	}
+
+	_ = os.RemoveAll(downloadPath)
+	return "", VideoInfo{}, classifyProcessingError(rawURL, lastErr)
+}
+
+func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID string) (string, error) {
+	if !ValidateSupportedURL(rawURL) {
+		return "", errors.New("not a valid supported video URL")
+	}
+
+	if downloadID == "" || strings.Contains(downloadID, "/") || strings.Contains(downloadID, "..") {
+		return "", errors.New("invalid download ID")
+	}
+
+	downloadPath := filepath.Join(c.downloadDir, downloadID)
+	if err := os.MkdirAll(downloadPath, 0o755); err != nil {
+		return "", fmt.Errorf("create download directory: %w", err)
+	}
+
+	if fallbackMedia, err := readFallbackManifest(downloadPath); err == nil {
+		filePath, handled, downloadErr := c.downloadFromFallback(ctx, rawURL, downloadPath, formatID, fallbackMedia)
+		if handled {
+			return filePath, downloadErr
+		}
+	}
+
+	outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
+	lastErr := c.downloadWithYTDLP(ctx, rawURL, outputTemplate, formatID)
+
+	if lastErr != nil && shouldRetryWithResolvedURL(rawURL, lastErr) {
+		resolvedURL := c.resolveMediaURL(ctx, rawURL)
+		if resolvedURL != rawURL {
+			lastErr = c.downloadWithYTDLP(ctx, resolvedURL, outputTemplate, formatID)
+		}
+	}
+
+	if lastErr == nil {
+		return c.findDownloadedFile(downloadPath)
+	}
+
+	if fallbackMedia, fallbackErr := c.resolveWithFallbackProviders(ctx, rawURL); fallbackErr == nil {
+		filePath, handled, downloadErr := c.downloadFromFallback(ctx, rawURL, downloadPath, formatID, *fallbackMedia)
+		if handled {
+			if downloadErr == nil {
+				_ = writeFallbackManifest(downloadPath, *fallbackMedia)
+			}
+			return filePath, downloadErr
+		}
+		lastErr = fallbackErr
+	}
+
+	return "", classifyProcessingError(rawURL, lastErr)
+}
+
+func (c *Client) extractWithYTDLP(ctx context.Context, rawURL string) (VideoInfo, error) {
 	var lastErr error
 	for _, args := range buildInfoStrategies(rawURL) {
 		output, err := runCommand(ctx, c.ytdlpBinary, args...)
@@ -91,7 +203,7 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 			duration = &d
 		}
 
-		return downloadID, VideoInfo{
+		return VideoInfo{
 			ThumbnailURL: info.Thumbnail,
 			Title:        fallback(info.Title, "Video"),
 			Duration:     duration,
@@ -99,116 +211,25 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 		}, nil
 	}
 
-	if shouldRetryWithResolvedURL(rawURL, lastErr) {
-		resolvedURL := c.resolveMediaURL(ctx, rawURL)
-		if resolvedURL != rawURL {
-			for _, args := range buildInfoStrategies(resolvedURL) {
-				output, err := runCommand(ctx, c.ytdlpBinary, args...)
-				if err != nil {
-					lastErr = err
-					continue
-				}
-
-				var info ytdlpInfo
-				if err := json.Unmarshal(output, &info); err != nil {
-					lastErr = fmt.Errorf("parse yt-dlp output: %w", err)
-					continue
-				}
-
-				formats := normalizeFormats(info.Formats)
-				if len(formats) == 0 {
-					formats = []Format{{
-						FormatID:   "best",
-						Resolution: "best",
-						Ext:        "mp4",
-						FormatNote: "Best available quality - MP4 (recommended)",
-					}}
-				}
-
-				var duration *int
-				if info.Duration != nil {
-					d := int(math.Round(*info.Duration))
-					duration = &d
-				}
-
-				return downloadID, VideoInfo{
-					ThumbnailURL: info.Thumbnail,
-					Title:        fallback(info.Title, "Video"),
-					Duration:     duration,
-					Formats:      formats,
-				}, nil
-			}
-		}
-	}
-
-	_ = os.RemoveAll(downloadPath)
-	return "", VideoInfo{}, friendlyYTDLPError(rawURL, lastErr)
+	return VideoInfo{}, lastErr
 }
 
-func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID string) (string, error) {
-	if !ValidateSupportedURL(rawURL) {
-		return "", errors.New("not a valid supported video URL")
-	}
-
-	if downloadID == "" || strings.Contains(downloadID, "/") || strings.Contains(downloadID, "..") {
-		return "", errors.New("invalid download ID")
-	}
-
-	downloadPath := filepath.Join(c.downloadDir, downloadID)
-	if err := os.MkdirAll(downloadPath, 0o755); err != nil {
-		return "", fmt.Errorf("create download directory: %w", err)
-	}
-
-	outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
-	var lastErr error
+func (c *Client) downloadWithYTDLP(ctx context.Context, rawURL, outputTemplate, formatID string) error {
 	primarySelector, fallbackSelector := buildDownloadSelectors(rawURL, formatID)
 	args := buildDownloadArgs(rawURL, outputTemplate, primarySelector)
 	if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
-		lastErr = err
 		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
 			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector)
 			if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr == nil {
-				lastErr = nil
+				return nil
 			} else {
-				lastErr = retryErr
+				return retryErr
 			}
 		}
-	} else {
-		lastErr = nil
+		return err
 	}
 
-	if lastErr != nil && shouldRetryWithResolvedURL(rawURL, lastErr) {
-		resolvedURL := c.resolveMediaURL(ctx, rawURL)
-		if resolvedURL != rawURL {
-			primarySelector, fallbackSelector = buildDownloadSelectors(resolvedURL, formatID)
-			args = buildDownloadArgs(resolvedURL, outputTemplate, primarySelector)
-			if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
-				lastErr = err
-				if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
-					retryArgs := buildDownloadArgs(resolvedURL, outputTemplate, fallbackSelector)
-					if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr == nil {
-						lastErr = nil
-					} else {
-						lastErr = retryErr
-					}
-				}
-			} else {
-				lastErr = nil
-			}
-		}
-	}
-
-	if lastErr == nil {
-		matches, err := filepath.Glob(filepath.Join(downloadPath, "*"))
-		if err != nil || len(matches) == 0 {
-			return "", errors.New("download completed but no file was created")
-		}
-
-		slices.Sort(matches)
-		return matches[0], nil
-	}
-
-	return "", friendlyYTDLPError(rawURL, lastErr)
+	return nil
 }
 
 func shouldRetryWithResolvedURL(rawURL string, err error) bool {
@@ -217,6 +238,28 @@ func shouldRetryWithResolvedURL(rawURL string, err error) bool {
 	}
 
 	return strings.Contains(err.Error(), "Unsupported URL")
+}
+
+func (c *Client) resolveWithFallbackProviders(ctx context.Context, rawURL string) (*FallbackMedia, error) {
+	var lastErr error
+	for _, provider := range c.fallbackProviders {
+		if provider == nil || !provider.Supports(rawURL) {
+			continue
+		}
+
+		media, err := provider.Resolve(ctx, rawURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if media == nil {
+			lastErr = errors.New("fallback provider returned no media")
+			continue
+		}
+		return media, nil
+	}
+
+	return nil, lastErr
 }
 
 func (c *Client) resolveMediaURL(ctx context.Context, rawURL string) string {
@@ -258,6 +301,50 @@ func (c *Client) resolveMediaURL(ctx context.Context, rawURL string) string {
 	}
 
 	return resolvedURL
+}
+
+func (c *Client) downloadFromFallback(ctx context.Context, rawURL, downloadPath, formatID string, media FallbackMedia) (string, bool, error) {
+	if len(media.Downloads) > 0 {
+		selected, err := pickDirectMedia(media.Downloads, formatID)
+		if err != nil {
+			return "", true, err
+		}
+
+		filePath, err := downloadDirectMedia(ctx, downloadPath, media.Info.Title, selected)
+		return filePath, true, err
+	}
+
+	if media.CanonicalURL != "" && media.CanonicalURL != rawURL {
+		outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
+		if err := c.downloadWithYTDLP(ctx, media.CanonicalURL, outputTemplate, formatID); err != nil {
+			return "", true, err
+		}
+		filePath, err := c.findDownloadedFile(downloadPath)
+		return filePath, true, err
+	}
+
+	return "", false, nil
+}
+
+func (c *Client) findDownloadedFile(downloadPath string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(downloadPath, "*"))
+	if err != nil || len(matches) == 0 {
+		return "", errors.New("download completed but no file was created")
+	}
+
+	filtered := matches[:0]
+	for _, match := range matches {
+		if filepath.Base(match) == fallbackManifestName {
+			continue
+		}
+		filtered = append(filtered, match)
+	}
+	if len(filtered) == 0 {
+		return "", errors.New("download completed but no file was created")
+	}
+
+	slices.Sort(filtered)
+	return filtered[0], nil
 }
 
 func buildDownloadSelectors(rawURL, formatID string) (string, string) {
@@ -426,6 +513,19 @@ func friendlyYTDLPError(rawURL string, err error) error {
 	}
 }
 
+func classifyProcessingError(rawURL string, err error) error {
+	if err == nil {
+		return errors.New("video processing failed")
+	}
+
+	message := err.Error()
+	if strings.Contains(message, "yt-dlp") || strings.Contains(message, "Unsupported URL") || strings.Contains(strings.ToLower(message), "unable to extract") {
+		return friendlyYTDLPError(rawURL, err)
+	}
+
+	return err
+}
+
 func providerExtractionError(rawURL string) string {
 	switch {
 	case IsFacebookURL(rawURL):
@@ -471,4 +571,126 @@ func randomID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func mergeFallbackInfo(base, override VideoInfo) VideoInfo {
+	if strings.TrimSpace(base.ThumbnailURL) == "" {
+		base.ThumbnailURL = override.ThumbnailURL
+	}
+	if strings.TrimSpace(base.Title) == "" {
+		base.Title = override.Title
+	}
+	if base.Duration == nil {
+		base.Duration = override.Duration
+	}
+	if len(base.Formats) == 0 {
+		base.Formats = override.Formats
+	}
+	return base
+}
+
+func formatsFromDirectMedia(downloads []DirectMedia) []Format {
+	if len(downloads) == 0 {
+		return nil
+	}
+
+	formats := make([]Format, 0, len(downloads))
+	for _, download := range downloads {
+		formats = append(formats, Format{
+			FormatID:   fallback(download.FormatID, "best"),
+			Resolution: fallback(download.Resolution, "best"),
+			Ext:        fallback(download.Ext, "mp4"),
+			Filesize:   download.Filesize,
+			FormatNote: fallback(download.FormatNote, buildFormatNote(download.Resolution, download.Ext, download.Resolution != "")),
+		})
+	}
+	return formats
+}
+
+func pickDirectMedia(downloads []DirectMedia, formatID string) (DirectMedia, error) {
+	if len(downloads) == 0 {
+		return DirectMedia{}, errors.New("no direct downloads are available")
+	}
+
+	if formatID == "" || formatID == "best" {
+		return downloads[0], nil
+	}
+
+	for _, download := range downloads {
+		if download.FormatID == formatID {
+			return download, nil
+		}
+	}
+
+	return DirectMedia{}, fmt.Errorf("requested format %q is not available", formatID)
+}
+
+func downloadDirectMedia(ctx context.Context, downloadPath, title string, media DirectMedia) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, media.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("direct media download failed with status %s", resp.Status)
+	}
+
+	fileName := sanitizeFilename(fallback(title, "Video")) + "." + fallback(media.Ext, "mp4")
+	filePath := filepath.Join(downloadPath, fileName)
+	file, err := os.Create(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		return "", err
+	}
+
+	return filePath, nil
+}
+
+func sanitizeFilename(name string) string {
+	name = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`).ReplaceAllString(name, "_")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "video"
+	}
+	return name
+}
+
+func writeFallbackManifest(downloadPath string, media FallbackMedia) error {
+	data, err := json.Marshal(media)
+	if err != nil {
+		return fmt.Errorf("marshal fallback media: %w", err)
+	}
+
+	manifestPath := filepath.Join(downloadPath, fallbackManifestName)
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		return fmt.Errorf("write fallback manifest: %w", err)
+	}
+
+	return nil
+}
+
+func readFallbackManifest(downloadPath string) (FallbackMedia, error) {
+	manifestPath := filepath.Join(downloadPath, fallbackManifestName)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return FallbackMedia{}, err
+	}
+
+	var media FallbackMedia
+	if err := json.Unmarshal(data, &media); err != nil {
+		return FallbackMedia{}, fmt.Errorf("parse fallback manifest: %w", err)
+	}
+
+	return media, nil
 }

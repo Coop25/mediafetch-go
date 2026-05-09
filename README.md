@@ -101,6 +101,29 @@ filePath, err := client.Download(ctx, videoURL, downloadID, "best")
 
 `Download` returns the local file path written by `yt-dlp`.
 
+## Fallback Providers
+
+`mediafetch-go` can also use optional fallback providers when `yt-dlp` is not enough.
+
+Add them through `ClientConfig`:
+
+```go
+client, err := mediafetch.NewClient(mediafetch.ClientConfig{
+	DownloadDir: "downloads",
+	FallbackProviders: []mediafetch.FallbackProvider{
+		myFacebookFallback,
+	},
+})
+```
+
+A fallback provider can return:
+
+- a canonical URL to retry with `yt-dlp`
+- normalized `VideoInfo`
+- direct media URLs that `mediafetch-go` can download itself
+
+This is useful for browser-assisted or scraper-backed Facebook flows without forcing them into the main `yt-dlp` path.
+
 ## Example
 
 ```go
