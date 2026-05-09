@@ -14,16 +14,31 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
 type Client struct {
-	downloadDir       string
-	ytdlpBinary       string
-	fallbackProviders []FallbackProvider
+	downloadDir string
+	ytdlpBinary string
 }
 
 const fallbackManifestName = ".mediafetch-fallback.json"
+
+type directMedia struct {
+	FormatID   string `json:"format_id"`
+	URL        string `json:"url"`
+	Resolution string `json:"resolution"`
+	Ext        string `json:"ext"`
+	Filesize   *int64 `json:"filesize,omitempty"`
+	FormatNote string `json:"format_note"`
+}
+
+type fallbackMedia struct {
+	CanonicalURL string        `json:"canonical_url,omitempty"`
+	Info         VideoInfo     `json:"info"`
+	Downloads    []directMedia `json:"downloads,omitempty"`
+}
 
 func NewClient(cfg ClientConfig) (*Client, error) {
 	downloadDir := strings.TrimSpace(cfg.DownloadDir)
@@ -41,9 +56,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	return &Client{
-		downloadDir:       downloadDir,
-		ytdlpBinary:       ytdlpBinary,
-		fallbackProviders: append([]FallbackProvider(nil), cfg.FallbackProviders...),
+		downloadDir: downloadDir,
+		ytdlpBinary: ytdlpBinary,
 	}, nil
 }
 
@@ -81,7 +95,7 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 		if resolvedURL != rawURL {
 			info, resolvedErr := c.extractWithYTDLP(ctx, resolvedURL)
 			if resolvedErr == nil {
-				if err := writeFallbackManifest(downloadPath, FallbackMedia{CanonicalURL: resolvedURL, Info: info}); err != nil {
+				if err := writeFallbackManifest(downloadPath, fallbackMedia{CanonicalURL: resolvedURL, Info: info}); err != nil {
 					_ = os.RemoveAll(downloadPath)
 					return "", VideoInfo{}, err
 				}
@@ -97,24 +111,24 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 		}
 	}
 
-	if fallbackMedia, fallbackErr := c.resolveWithFallbackProviders(ctx, rawURL); fallbackErr == nil {
-		if fallbackMedia.CanonicalURL != "" {
-			if info, resolvedErr := c.extractWithYTDLP(ctx, fallbackMedia.CanonicalURL); resolvedErr == nil {
-				fallbackMedia.Info = mergeFallbackInfo(fallbackMedia.Info, info)
+	if media, fallbackErr := c.extractWithFacebookHTMLFallback(ctx, rawURL); fallbackErr == nil {
+		if media.CanonicalURL != "" {
+			if info, resolvedErr := c.extractWithYTDLP(ctx, media.CanonicalURL); resolvedErr == nil {
+				media.Info = mergeFallbackInfo(media.Info, info)
 			}
 		}
 
-		if len(fallbackMedia.Info.Formats) == 0 {
-			fallbackMedia.Info.Formats = formatsFromDirectMedia(fallbackMedia.Downloads)
+		if len(media.Info.Formats) == 0 {
+			media.Info.Formats = formatsFromDirectMedia(media.Downloads)
 		}
-		fallbackMedia.Info.Title = fallback(fallbackMedia.Info.Title, "Video")
+		media.Info.Title = fallback(media.Info.Title, "Video")
 
-		if err := writeFallbackManifest(downloadPath, *fallbackMedia); err != nil {
+		if err := writeFallbackManifest(downloadPath, *media); err != nil {
 			_ = os.RemoveAll(downloadPath)
 			return "", VideoInfo{}, err
 		}
 
-		return downloadID, fallbackMedia.Info, nil
+		return downloadID, media.Info, nil
 	} else if fallbackErr != nil {
 		lastErr = fallbackErr
 	}
@@ -137,8 +151,8 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 		return "", fmt.Errorf("create download directory: %w", err)
 	}
 
-	if fallbackMedia, err := readFallbackManifest(downloadPath); err == nil {
-		filePath, handled, downloadErr := c.downloadFromFallback(ctx, rawURL, downloadPath, formatID, fallbackMedia)
+	if media, err := readFallbackManifest(downloadPath); err == nil {
+		filePath, handled, downloadErr := c.downloadFromFallback(ctx, rawURL, downloadPath, formatID, media)
 		if handled {
 			return filePath, downloadErr
 		}
@@ -158,11 +172,11 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 		return c.findDownloadedFile(downloadPath)
 	}
 
-	if fallbackMedia, fallbackErr := c.resolveWithFallbackProviders(ctx, rawURL); fallbackErr == nil {
-		filePath, handled, downloadErr := c.downloadFromFallback(ctx, rawURL, downloadPath, formatID, *fallbackMedia)
+	if media, fallbackErr := c.extractWithFacebookHTMLFallback(ctx, rawURL); fallbackErr == nil {
+		filePath, handled, downloadErr := c.downloadFromFallback(ctx, rawURL, downloadPath, formatID, *media)
 		if handled {
 			if downloadErr == nil {
-				_ = writeFallbackManifest(downloadPath, *fallbackMedia)
+				_ = writeFallbackManifest(downloadPath, *media)
 			}
 			return filePath, downloadErr
 		}
@@ -240,28 +254,6 @@ func shouldRetryWithResolvedURL(rawURL string, err error) bool {
 	return strings.Contains(err.Error(), "Unsupported URL")
 }
 
-func (c *Client) resolveWithFallbackProviders(ctx context.Context, rawURL string) (*FallbackMedia, error) {
-	var lastErr error
-	for _, provider := range c.fallbackProviders {
-		if provider == nil || !provider.Supports(rawURL) {
-			continue
-		}
-
-		media, err := provider.Resolve(ctx, rawURL)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if media == nil {
-			lastErr = errors.New("fallback provider returned no media")
-			continue
-		}
-		return media, nil
-	}
-
-	return nil, lastErr
-}
-
 func (c *Client) resolveMediaURL(ctx context.Context, rawURL string) string {
 	if !shouldResolveRedirect(rawURL) {
 		return rawURL
@@ -303,7 +295,158 @@ func (c *Client) resolveMediaURL(ctx context.Context, rawURL string) string {
 	return resolvedURL
 }
 
-func (c *Client) downloadFromFallback(ctx context.Context, rawURL, downloadPath, formatID string, media FallbackMedia) (string, bool, error) {
+func (c *Client) extractWithFacebookHTMLFallback(ctx context.Context, rawURL string) (*fallbackMedia, error) {
+	if !IsFacebookURL(rawURL) {
+		return nil, errors.New("facebook html fallback only supports facebook urls")
+	}
+
+	candidates := []string{rawURL}
+	resolvedURL := c.resolveMediaURL(ctx, rawURL)
+	if resolvedURL != rawURL {
+		candidates = append(candidates, resolvedURL)
+	}
+
+	var lastErr error
+	for _, candidateURL := range candidates {
+		html, finalURL, err := c.fetchHTMLSource(ctx, candidateURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		media := parseFacebookHTMLFallback(html)
+		if media == nil {
+			lastErr = errors.New("facebook html fallback found no media URLs")
+			continue
+		}
+
+		if strings.TrimSpace(media.CanonicalURL) == "" {
+			media.CanonicalURL = finalURL
+		}
+		if strings.TrimSpace(media.Info.Title) == "" {
+			media.Info.Title = parseHTMLMetaContent(html, "og:title")
+		}
+		if strings.TrimSpace(media.Info.ThumbnailURL) == "" {
+			media.Info.ThumbnailURL = parseHTMLMetaContent(html, "og:image")
+		}
+		if len(media.Info.Formats) == 0 {
+			media.Info.Formats = formatsFromDirectMedia(media.Downloads)
+		}
+		if len(media.Downloads) > 0 {
+			return media, nil
+		}
+		lastErr = errors.New("facebook html fallback found no direct downloads")
+	}
+
+	return nil, lastErr
+}
+
+func (c *Client) fetchHTMLSource(ctx context.Context, rawURL string) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", rawURL, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", rawURL, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", rawURL, err
+	}
+
+	finalURL := rawURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", finalURL, fmt.Errorf("facebook html fallback failed with status %s", resp.Status)
+	}
+
+	return string(body), finalURL, nil
+}
+
+func parseFacebookHTMLFallback(html string) *fallbackMedia {
+	patterns := []struct {
+		key        string
+		formatID   string
+		resolution string
+	}{
+		{`browser_native_hd_url`, "hd", "hd"},
+		{`playable_url_quality_hd`, "hd", "hd"},
+		{`browser_native_sd_url`, "sd", "sd"},
+		{`playable_url`, "sd", "sd"},
+	}
+
+	seen := map[string]bool{}
+	downloads := make([]directMedia, 0, len(patterns))
+	for _, pattern := range patterns {
+		url := parseJSONStringField(html, pattern.key)
+		if strings.TrimSpace(url) == "" || seen[url] {
+			continue
+		}
+		seen[url] = true
+		downloads = append(downloads, directMedia{
+			FormatID:   pattern.formatID,
+			URL:        url,
+			Resolution: pattern.resolution,
+			Ext:        "mp4",
+			FormatNote: buildFormatNote(pattern.resolution, "mp4", pattern.resolution != ""),
+		})
+	}
+
+	if len(downloads) == 0 {
+		return nil
+	}
+
+	return &fallbackMedia{
+		CanonicalURL: parseHTMLMetaContent(html, "og:url"),
+		Info: VideoInfo{
+			Title:        parseHTMLMetaContent(html, "og:title"),
+			ThumbnailURL: parseHTMLMetaContent(html, "og:image"),
+		},
+		Downloads: downloads,
+	}
+}
+
+func parseJSONStringField(input, field string) string {
+	re := regexp.MustCompile(`"` + regexp.QuoteMeta(field) + `"\s*:\s*"((?:\\.|[^"\\])*)"`)
+	matches := re.FindStringSubmatch(input)
+	if len(matches) < 2 {
+		return ""
+	}
+
+	value, err := strconv.Unquote(`"` + matches[1] + `"`)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func parseHTMLMetaContent(input, property string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)<meta[^>]+property=["']` + regexp.QuoteMeta(property) + `["'][^>]+content=["']([^"']+)["']`),
+		regexp.MustCompile(`(?i)<meta[^>]+content=["']([^"']+)["'][^>]+property=["']` + regexp.QuoteMeta(property) + `["']`),
+	}
+
+	for _, pattern := range patterns {
+		matches := pattern.FindStringSubmatch(input)
+		if len(matches) >= 2 {
+			return strings.TrimSpace(matches[1])
+		}
+	}
+
+	return ""
+}
+
+func (c *Client) downloadFromFallback(ctx context.Context, rawURL, downloadPath, formatID string, media fallbackMedia) (string, bool, error) {
 	if len(media.Downloads) > 0 {
 		selected, err := pickDirectMedia(media.Downloads, formatID)
 		if err != nil {
@@ -589,7 +732,7 @@ func mergeFallbackInfo(base, override VideoInfo) VideoInfo {
 	return base
 }
 
-func formatsFromDirectMedia(downloads []DirectMedia) []Format {
+func formatsFromDirectMedia(downloads []directMedia) []Format {
 	if len(downloads) == 0 {
 		return nil
 	}
@@ -607,9 +750,9 @@ func formatsFromDirectMedia(downloads []DirectMedia) []Format {
 	return formats
 }
 
-func pickDirectMedia(downloads []DirectMedia, formatID string) (DirectMedia, error) {
+func pickDirectMedia(downloads []directMedia, formatID string) (directMedia, error) {
 	if len(downloads) == 0 {
-		return DirectMedia{}, errors.New("no direct downloads are available")
+		return directMedia{}, errors.New("no direct downloads are available")
 	}
 
 	if formatID == "" || formatID == "best" {
@@ -622,10 +765,10 @@ func pickDirectMedia(downloads []DirectMedia, formatID string) (DirectMedia, err
 		}
 	}
 
-	return DirectMedia{}, fmt.Errorf("requested format %q is not available", formatID)
+	return directMedia{}, fmt.Errorf("requested format %q is not available", formatID)
 }
 
-func downloadDirectMedia(ctx context.Context, downloadPath, title string, media DirectMedia) (string, error) {
+func downloadDirectMedia(ctx context.Context, downloadPath, title string, media directMedia) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, media.URL, nil)
 	if err != nil {
 		return "", err
@@ -666,7 +809,7 @@ func sanitizeFilename(name string) string {
 	return name
 }
 
-func writeFallbackManifest(downloadPath string, media FallbackMedia) error {
+func writeFallbackManifest(downloadPath string, media fallbackMedia) error {
 	data, err := json.Marshal(media)
 	if err != nil {
 		return fmt.Errorf("marshal fallback media: %w", err)
@@ -680,16 +823,16 @@ func writeFallbackManifest(downloadPath string, media FallbackMedia) error {
 	return nil
 }
 
-func readFallbackManifest(downloadPath string) (FallbackMedia, error) {
+func readFallbackManifest(downloadPath string) (fallbackMedia, error) {
 	manifestPath := filepath.Join(downloadPath, fallbackManifestName)
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return FallbackMedia{}, err
+		return fallbackMedia{}, err
 	}
 
-	var media FallbackMedia
+	var media fallbackMedia
 	if err := json.Unmarshal(data, &media); err != nil {
-		return FallbackMedia{}, fmt.Errorf("parse fallback manifest: %w", err)
+		return fallbackMedia{}, fmt.Errorf("parse fallback manifest: %w", err)
 	}
 
 	return media, nil
