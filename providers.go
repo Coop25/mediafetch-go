@@ -60,3 +60,7 @@ func matchesHost(raw string, patterns []string) bool {
 	}
 	return false
 }
+
+func shouldResolveRedirect(raw string) bool {
+	return IsFacebookURL(raw)
+}

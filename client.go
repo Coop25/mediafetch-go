@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,6 +51,8 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 		return "", VideoInfo{}, errors.New("not a valid supported video URL")
 	}
 
+	resolvedURL := c.resolveMediaURL(ctx, rawURL)
+
 	downloadID, err := randomID()
 	if err != nil {
 		return "", VideoInfo{}, fmt.Errorf("generate download ID: %w", err)
@@ -60,7 +63,7 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 		return "", VideoInfo{}, fmt.Errorf("create download directory: %w", err)
 	}
 
-	strategies := buildInfoStrategies(rawURL)
+	strategies := buildInfoStrategies(resolvedURL)
 
 	var lastErr error
 	for _, args := range strategies {
@@ -101,13 +104,15 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (string, VideoInfo,
 	}
 
 	_ = os.RemoveAll(downloadPath)
-	return "", VideoInfo{}, friendlyYTDLPError(rawURL, lastErr)
+	return "", VideoInfo{}, friendlyYTDLPError(resolvedURL, lastErr)
 }
 
 func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID string) (string, error) {
 	if !ValidateSupportedURL(rawURL) {
 		return "", errors.New("not a valid supported video URL")
 	}
+
+	resolvedURL := c.resolveMediaURL(ctx, rawURL)
 
 	if downloadID == "" || strings.Contains(downloadID, "/") || strings.Contains(downloadID, "..") {
 		return "", errors.New("invalid download ID")
@@ -119,17 +124,17 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 	}
 
 	outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
-	primarySelector, fallbackSelector := buildDownloadSelectors(rawURL, formatID)
-	args := buildDownloadArgs(rawURL, outputTemplate, primarySelector)
+	primarySelector, fallbackSelector := buildDownloadSelectors(resolvedURL, formatID)
+	args := buildDownloadArgs(resolvedURL, outputTemplate, primarySelector)
 
 	if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
 		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
-			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector)
+			retryArgs := buildDownloadArgs(resolvedURL, outputTemplate, fallbackSelector)
 			if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr != nil {
-				return "", friendlyYTDLPError(rawURL, retryErr)
+				return "", friendlyYTDLPError(resolvedURL, retryErr)
 			}
 		} else {
-			return "", friendlyYTDLPError(rawURL, err)
+			return "", friendlyYTDLPError(resolvedURL, err)
 		}
 	}
 
@@ -140,6 +145,47 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 
 	slices.Sort(matches)
 	return matches[0], nil
+}
+
+func (c *Client) resolveMediaURL(ctx context.Context, rawURL string) string {
+	if !shouldResolveRedirect(rawURL) {
+		return rawURL
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return rawURL
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return rawURL
+	}
+	defer resp.Body.Close()
+
+	if resp.Request == nil || resp.Request.URL == nil {
+		return rawURL
+	}
+
+	resolvedURL := resp.Request.URL.String()
+	if strings.TrimSpace(resolvedURL) == "" {
+		return rawURL
+	}
+
+	return resolvedURL
 }
 
 func buildDownloadSelectors(rawURL, formatID string) (string, string) {
@@ -298,6 +344,8 @@ func friendlyYTDLPError(rawURL string, err error) error {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "Cannot parse data"), strings.Contains(strings.ToLower(message), "unable to extract"):
+		return errors.New(providerExtractionError(rawURL))
+	case IsFacebookURL(rawURL) && strings.Contains(message, "Unsupported URL"):
 		return errors.New(providerExtractionError(rawURL))
 	case strings.Contains(message, "Private video"), strings.Contains(strings.ToLower(message), "login"):
 		return errors.New("This video appears to be private or requires login. Only public posts or videos can be downloaded.")

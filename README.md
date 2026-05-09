@@ -198,7 +198,7 @@ Each `Format` contains:
 
 - This package depends on upstream `yt-dlp` behavior, so provider changes can break extraction.
 - Some videos may fail if they are private, age-restricted, login-protected, or region-limited.
-- Facebook links may require a direct video URL instead of a share link.
+- Facebook URLs are resolved to their final video URL when possible, but some restricted or login-gated posts may still fail.
 - Instagram and TikTok support public posts only and may fail on login-gated or restricted content.
 - Twitter/X support public posts only and may fail on protected, login-gated, or restricted content.
 
