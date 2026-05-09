@@ -106,7 +106,14 @@ filePath, err := client.Download(ctx, videoURL, downloadID, "best")
 
 ## Facebook Fallback
 
-For Facebook URLs, `mediafetch-go` now tries `yt-dlp` first and then falls back to parsing the fetched page HTML for direct media fields such as HD/SD video URLs when `yt-dlp` cannot extract the video.
+For Facebook URLs, `mediafetch-go` now tries `yt-dlp` first and then falls back to a browser-like HTML fetch flow when `yt-dlp` cannot extract the video.
+
+That fallback currently:
+
+- resolves Facebook share links to their final destination when possible
+- retries against mobile Facebook page variants
+- parses direct media fields such as `browser_native_hd_url` and `playable_url`
+- detects signed `video-*.xx.fbcdn.net/...mp4` CDN URLs exposed in the page source and normalizes away partial byte-range query parameters
 
 ## Example
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -302,11 +303,8 @@ func (c *Client) extractWithFacebookHTMLFallback(ctx context.Context, rawURL str
 		return nil, errors.New("facebook html fallback only supports facebook urls")
 	}
 
-	candidates := []string{rawURL}
 	resolvedURL := c.resolveMediaURL(ctx, rawURL)
-	if resolvedURL != rawURL {
-		candidates = append(candidates, resolvedURL)
-	}
+	candidates := buildFacebookFallbackCandidates(rawURL, resolvedURL)
 
 	var lastErr error
 	for _, candidateURL := range candidates {
@@ -390,18 +388,28 @@ func parseFacebookHTMLFallback(html string) *fallbackMedia {
 	seen := map[string]bool{}
 	downloads := make([]directMedia, 0, len(patterns))
 	for _, pattern := range patterns {
-		url := parseJSONStringField(html, pattern.key)
-		if strings.TrimSpace(url) == "" || seen[url] {
+		mediaURL := normalizeFacebookMediaURL(parseJSONStringField(html, pattern.key))
+		if strings.TrimSpace(mediaURL) == "" || seen[mediaURL] {
 			continue
 		}
-		seen[url] = true
+		seen[mediaURL] = true
 		downloads = append(downloads, directMedia{
 			FormatID:   pattern.formatID,
-			URL:        url,
+			URL:        mediaURL,
 			Resolution: pattern.resolution,
 			Ext:        "mp4",
 			FormatNote: buildFormatNote(pattern.resolution, "mp4", pattern.resolution != ""),
 		})
+	}
+
+	for index, download := range parseFacebookCDNVideoURLs(html, seen) {
+		if download.FormatID == "" {
+			download.FormatID = fmt.Sprintf("direct-%d", index+1)
+		}
+		if download.FormatNote == "" {
+			download.FormatNote = buildFormatNote(download.Resolution, download.Ext, download.Resolution != "")
+		}
+		downloads = append(downloads, download)
 	}
 
 	if len(downloads) == 0 {
@@ -430,6 +438,90 @@ func parseJSONStringField(input, field string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func parseFacebookCDNVideoURLs(input string, seen map[string]bool) []directMedia {
+	normalized := strings.ReplaceAll(input, `\/`, `/`)
+	re := regexp.MustCompile(`https://video[^"'\\\s<]+?\.mp4(?:\?[^"'\\\s<]*)?`)
+	matches := re.FindAllString(normalized, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	downloads := make([]directMedia, 0, len(matches))
+	for _, match := range matches {
+		mediaURL := normalizeFacebookMediaURL(strings.TrimSpace(match))
+		if mediaURL == "" || seen[mediaURL] {
+			continue
+		}
+		seen[mediaURL] = true
+		downloads = append(downloads, directMedia{
+			URL:        mediaURL,
+			Resolution: inferFacebookCDNResolution(mediaURL),
+			Ext:        "mp4",
+		})
+	}
+
+	return downloads
+}
+
+func normalizeFacebookMediaURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	query := parsed.Query()
+	query.Del("bytestart")
+	query.Del("byteend")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func inferFacebookCDNResolution(raw string) string {
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "hd"):
+		return "hd"
+	case strings.Contains(lower, "sd"):
+		return "sd"
+	default:
+		return ""
+	}
+}
+
+func buildFacebookFallbackCandidates(rawURL, resolvedURL string) []string {
+	candidates := []string{rawURL}
+	if resolvedURL != "" && resolvedURL != rawURL {
+		candidates = append(candidates, resolvedURL)
+	}
+
+	// Facebook often exposes different embedded media fields on m.facebook.com.
+	for _, candidate := range append([]string{}, candidates...) {
+		if mobileURL := toMobileFacebookURL(candidate); mobileURL != "" && !slices.Contains(candidates, mobileURL) {
+			candidates = append(candidates, mobileURL)
+		}
+	}
+
+	return candidates
+}
+
+func toMobileFacebookURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if !strings.Contains(strings.ToLower(parsed.Hostname()), "facebook.com") {
+		return ""
+	}
+
+	parsed.Host = "m.facebook.com"
+	return parsed.String()
 }
 
 func parseHTMLMetaContent(input, property string) string {
