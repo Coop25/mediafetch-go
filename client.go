@@ -26,6 +26,7 @@ type Client struct {
 }
 
 const fallbackManifestName = ".mediafetch-fallback.json"
+const maxFilenameStemLength = 120
 
 type directMedia struct {
 	FormatID   string `json:"format_id"`
@@ -161,7 +162,7 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 		}
 	}
 
-	outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
+	outputTemplate := buildSafeOutputTemplate(downloadPath)
 	lastErr := c.downloadWithYTDLP(ctx, rawURL, outputTemplate, formatID)
 
 	if lastErr != nil && shouldRetryWithResolvedURL(rawURL, lastErr) {
@@ -552,7 +553,7 @@ func (c *Client) downloadFromFallback(ctx context.Context, rawURL, downloadPath,
 	}
 
 	if media.CanonicalURL != "" && media.CanonicalURL != rawURL {
-		outputTemplate := filepath.Join(downloadPath, "%(title)s.%(ext)s")
+		outputTemplate := buildSafeOutputTemplate(downloadPath)
 		if err := c.downloadWithYTDLP(ctx, media.CanonicalURL, outputTemplate, formatID); err != nil {
 			return "", true, err
 		}
@@ -834,11 +835,21 @@ func downloadDirectMedia(ctx context.Context, downloadPath, title string, media 
 
 func sanitizeFilename(name string) string {
 	name = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`).ReplaceAllString(name, "_")
+	name = regexp.MustCompile(`\s+`).ReplaceAllString(name, " ")
 	name = strings.TrimSpace(name)
+	name = strings.Trim(name, ". ")
+	if len(name) > maxFilenameStemLength {
+		name = strings.TrimSpace(name[:maxFilenameStemLength])
+		name = strings.Trim(name, ". ")
+	}
 	if name == "" {
 		return "video"
 	}
 	return name
+}
+
+func buildSafeOutputTemplate(downloadPath string) string {
+	return filepath.Join(downloadPath, "%(id)s.%(ext)s")
 }
 
 func writeFallbackManifest(downloadPath string, media fallbackMedia) error {
