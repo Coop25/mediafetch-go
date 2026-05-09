@@ -21,6 +21,7 @@ import (
 type Client struct {
 	downloadDir string
 	ytdlpBinary string
+	settings    YTDLPSettings
 }
 
 const fallbackManifestName = ".mediafetch-fallback.json"
@@ -58,6 +59,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	return &Client{
 		downloadDir: downloadDir,
 		ytdlpBinary: ytdlpBinary,
+		settings:    normalizeYTDLPSettings(cfg.YTDLPSettings),
 	}, nil
 }
 
@@ -188,7 +190,7 @@ func (c *Client) Download(ctx context.Context, rawURL, downloadID, formatID stri
 
 func (c *Client) extractWithYTDLP(ctx context.Context, rawURL string) (VideoInfo, error) {
 	var lastErr error
-	for _, args := range buildInfoStrategies(rawURL) {
+	for _, args := range buildInfoStrategies(rawURL, c.settings) {
 		output, err := runCommand(ctx, c.ytdlpBinary, args...)
 		if err != nil {
 			lastErr = err
@@ -230,10 +232,10 @@ func (c *Client) extractWithYTDLP(ctx context.Context, rawURL string) (VideoInfo
 
 func (c *Client) downloadWithYTDLP(ctx context.Context, rawURL, outputTemplate, formatID string) error {
 	primarySelector, fallbackSelector := buildDownloadSelectors(rawURL, formatID)
-	args := buildDownloadArgs(rawURL, outputTemplate, primarySelector)
+	args := buildDownloadArgs(rawURL, outputTemplate, primarySelector, c.settings)
 	if _, err := runCommand(ctx, c.ytdlpBinary, args...); err != nil {
 		if strings.Contains(err.Error(), "Requested format is not available") && fallbackSelector != primarySelector {
-			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector)
+			retryArgs := buildDownloadArgs(rawURL, outputTemplate, fallbackSelector, c.settings)
 			if _, retryErr := runCommand(ctx, c.ytdlpBinary, retryArgs...); retryErr == nil {
 				return nil
 			} else {
@@ -523,68 +525,6 @@ func buildDownloadSelectors(rawURL, formatID string) (string, string) {
 	}
 
 	return formatID + "/best", "best"
-}
-
-func buildDownloadArgs(rawURL, outputTemplate, selector string) []string {
-	args := []string{
-		"-o", outputTemplate,
-		"--no-playlist",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-	}
-
-	if IsYouTubeURL(rawURL) || IsRedditURL(rawURL) || IsInstagramURL(rawURL) || IsTikTokURL(rawURL) || IsTwitterURL(rawURL) {
-		args = append(args, "--merge-output-format", "mp4")
-	}
-
-	if selector != "" {
-		args = append(args, "-f", selector)
-	}
-
-	return append(args, rawURL)
-}
-
-func buildInfoStrategies(rawURL string) [][]string {
-	if !IsFacebookURL(rawURL) {
-		return [][]string{
-			{
-				"--dump-single-json",
-				"--no-warnings",
-				"--skip-download",
-				"--no-playlist",
-				rawURL,
-			},
-		}
-	}
-
-	return [][]string{
-		{
-			"--dump-single-json",
-			"--no-warnings",
-			"--skip-download",
-			"--no-playlist",
-			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-			"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-			"--add-header", "Accept-Language:en-us,en;q=0.5",
-			rawURL,
-		},
-		{
-			"--dump-single-json",
-			"--no-warnings",
-			"--skip-download",
-			"--no-playlist",
-			"--extractor-args", "facebook:skip=dash",
-			"--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-			rawURL,
-		},
-		{
-			"--dump-single-json",
-			"--no-warnings",
-			"--skip-download",
-			"--no-playlist",
-			"--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-			rawURL,
-		},
-	}
 }
 
 func normalizeFormats(input []ytdlpFormat) []Format {

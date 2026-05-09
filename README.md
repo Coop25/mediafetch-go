@@ -78,6 +78,9 @@ Create a client:
 ```go
 client, err := mediafetch.NewClient(mediafetch.ClientConfig{
 	DownloadDir: "downloads",
+	YTDLPSettings: mediafetch.YTDLPSettings{
+		CookiesFromBrowser: "chrome",
+	},
 })
 ```
 
@@ -175,11 +178,20 @@ Each `Format` contains:
 - `Filesize`
 - `FormatNote`
 
+`YTDLPSettings` contains optional runtime settings for the shared downloader core:
+
+- `UserAgent`
+- `CookiesFromBrowser`
+- `CookiesFile`
+- `Proxy`
+- `ConfigLocation`
+
 ## How It Works
 
 `mediafetch-go` delegates provider-specific extraction and downloading to `yt-dlp`, while the Go package handles:
 
 - supported-host validation
+- centralized yt-dlp runtime settings and argument building
 - metadata parsing
 - format normalization
 - download directory management

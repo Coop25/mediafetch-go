@@ -15,7 +15,16 @@ type VideoInfo struct {
 	Formats      []Format
 }
 
+type YTDLPSettings struct {
+	UserAgent          string
+	CookiesFromBrowser string
+	CookiesFile        string
+	Proxy              string
+	ConfigLocation     string
+}
+
 type ClientConfig struct {
-	DownloadDir string
-	YTDLPBinary string
+	DownloadDir   string
+	YTDLPBinary   string
+	YTDLPSettings YTDLPSettings
 }
